@@ -1,0 +1,121 @@
+# 1. Create spot pool
+# az aks nodepool add --resource-group <RG_NAME> --cluster-name <CLUSTER_NAME> --name spotpool01 --priority Spot --labels scalesetpriority=spot --eviction-policy Delete --spot-max-price -1 --enable-cluster-autoscaler --min-count 2 --max-count 25  --node-vm-size Standard_D4s_v5 --no-wait
+# 2. add label to pools
+# az aks nodepool update --name spotpool01 --labels scalesetpriority=spot --cluster-name <CLUSTER_NAME> --resource-group <RG_NAME>
+# az aks nodepool update --name agentpool001 --labels scalesetpriority=system --cluster-name <CLUSTER_NAME> --resource-group <RG_NAME>
+# 3. kubectl --insecure-skip-tls-verify apply -f .\spot-supervisor.yml
+#
+# 4. add following in deployment yml
+#    spec:
+#      affinity:
+#        nodeAffinity:
+#          requiredDuringSchedulingIgnoredDuringExecution:
+#            nodeSelectorTerms:
+#            - matchExpressions:
+#              - key: scalesetpriority
+#                operator: In
+#                values:
+#                - #{AGENT_POOL_VALUE}#
+##               spot/system (add it under pipeline varriable for the environment) 
+#      containers:#
+# $context = "<CLUSTER_NAME>";kubectl --insecure-skip-tls-verify  --context $context get nodes -o custom-columns=NAME:.metadata.name,TAINTS:.spec.taints --no-headers
+#
+#CronJob to delete taint from spotpool01
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: spot-supervisor
+spec:
+  schedule: "*/1 * * * *"
+  concurrencyPolicy: Replace
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 60
+      template:
+        spec:
+          serviceAccountName: spot-runner-account
+          restartPolicy: Never
+          containers:
+          - name: spot-supervisor
+            image: kubesphere/kubectl
+            command: ["/bin/sh","-c"]
+            args: 
+              - >-
+                kubectl delete ValidatingWebhookConfiguration aks-node-validating-webhook;
+                kubectl taint node -l kubernetes.azure.com/scalesetpriority=spot kubernetes.azure.com/scalesetpriority=spot:NoSchedule- || echo "spot removed on " && date;
+          securityContext: {}
+          tolerations:
+            - effect: NoSchedule
+              key: node-role.kubernetes.io/master
+            - key: "kubernetes.azure.com/scalesetpriority"
+              operator: "Equal"
+              value: "spot"
+              effect: "NoSchedule"
+---
+#apiVersion: rbac.authorization.k8s.io/v1
+#kind: ClusterRole
+#metadata:
+#  name: modify-namespace
+#rules:
+#  - apiGroups: ["admissionregistration.k8s.io",""]
+#    resources:
+#      - nodes
+#      - mutatingwebhookconfigurations
+#      - validatingwebhookconfigurations
+#    verbs:
+#      - create
+#      - delete
+#      - list
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: modify-namespace
+rules:
+- apiGroups:
+  - '*'
+  resources:
+  - '*'
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - apply
+  - delete
+- apiGroups:
+  - <http://storage.k8s.io/v1|storage.k8s.io/v1>
+  resources:
+  - sc
+  verbs:
+  - '*'
+- apiGroups:
+  - ""
+  resources:
+  - pv
+  verbs:
+  - '*'
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: modify-namespace-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: modify-namespace
+subjects:
+- kind: ServiceAccount
+  name: spot-runner-account
+  namespace: default
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: spot-runner-account
+  namespace: default
